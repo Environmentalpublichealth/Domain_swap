@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --job-name=1KS4_con
+#SBATCH --partition=general
+#SBATCH --nodes=1
+#SBATCH --ntasks=64
+#SBATCH --cpus-per-task=1
+#SBATCH --time=24:00:00
+#SBATCH --output=gmx_%x_con.log
+
+module load gromacs/2022.5_plumed_gcc_9.5.0_openmpi_4.1.5
+
+export OMPI_MCA_opal_warn_on_missing_libcuda=0
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=^openib
+
+# Run from the same case/replicate directory as run_1KS4.batch.
+mpirun gmx_mpi mdrun -v -deffnm prod_1 -cpi prod_1.cpt -append -maxh 23.5 -ntomp 1

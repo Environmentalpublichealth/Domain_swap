@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=1KS4_run
+#SBATCH --partition=general
+#SBATCH --nodes=1
+#SBATCH --ntasks=64
+#SBATCH --cpus-per-task=1
+#SBATCH --time=24:00:00
+#SBATCH --output=gmx_%x.log
+
+module load gromacs/2022.5_plumed_gcc_9.5.0_openmpi_4.1.5
+
+export OMPI_MCA_opal_warn_on_missing_libcuda=0
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=^openib
+
+# Submit this from inside a case/replicate directory, e.g. WT/rep1/, M_E116x/rep2/,
+# that already has system.gro, system.top, posre.itp, and posre_backbone.itp
+# copied in (submit_replicates.sh does this copy for you -- see that script,
+# or 1KS4_GROMACS/01_amber_to_gromacs.sh and make_posre_backbone.sh for
+# building system.gro/system.top and the restraint files in the first place).
+# Each replicate directory gets its own full min->nvt->equi->prod run so that
+# nvt.mdp's gen_seed=-1 gives it independent starting velocities.
+
+MDP=../..   # two levels up from <case>/repN/ back to the shared 1KS4_GROMACS/*.mdp files
+
+# --- STEP 1: MINIMIZATION ---
+gmx_mpi grompp -f ${MDP}/min.mdp -c system.gro -p system.top -o min.tpr -maxwarn 1
+mpirun gmx_mpi mdrun -v -deffnm min -ntomp 1
+
+# --- STEP 2: NVT (heavy-atom restraints) ---
+gmx_mpi grompp -f ${MDP}/nvt.mdp -c min.gro -r min.gro -p system.top -o nvt.tpr -maxwarn 1
+mpirun gmx_mpi mdrun -v -deffnm nvt -ntomp 1
+
+# --- STEP 3: NPT (backbone restraints) ---
+gmx_mpi grompp -f ${MDP}/equi.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p system.top -o equi.tpr -maxwarn 1
+mpirun gmx_mpi mdrun -v -deffnm equi -ntomp 1
+
+# --- STEP 4: PRODUCTION ---
+gmx_mpi grompp -f ${MDP}/prod.mdp -c equi.gro -t equi.cpt -p system.top -o prod_1.tpr -maxwarn 1
+mpirun gmx_mpi mdrun -v -deffnm prod_1 -maxh 23.5 -ntomp 1

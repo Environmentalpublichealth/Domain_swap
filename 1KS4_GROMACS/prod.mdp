@@ -1,0 +1,31 @@
+integrator              = md
+nsteps                  = 100000000 ; 200 ns per replicate (x3 replicates = 600 ns total)
+dt                      = 0.002
+continuation            = yes
+constraint_algorithm    = lincs
+constraints             = h-bonds
+cutoff-scheme           = Verlet
+nstlist                 = 20
+vdwtype                 = Cut-off
+rvdw                    = 1.0
+coulombtype             = PME
+rcoulomb                = 1.0
+pme_order               = 4
+fourierspacing          = 0.16
+DispCorr                = EnerPres
+tcoupl                  = v-rescale
+tc-grps                 = Protein Non-Protein
+tau_t                   = 0.1     0.1
+ref_t                   = 300     300
+pcoupl                  = Parrinello-Rahman
+pcoupltype              = isotropic
+tau_p                   = 2.0
+ref_p                   = 1.0
+compressibility         = 4.5e-5
+gen_vel                 = no
+
+; --- output control ---
+nstxout-compressed      = 5000     ; 10 ps/frame
+compressed-x-grps       = System
+nstenergy               = 5000
+nstlog                  = 5000
