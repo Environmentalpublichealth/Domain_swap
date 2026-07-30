@@ -1,0 +1,27 @@
+# tleap_1KS4.in
+# 1KS4 endoglucanase A (A. niger, GH9), AMBER ff14SB + TIP3P -- same pattern as
+# tleap.in (XYN WT) / tleap_Q4.in, reusing the shared AMBER/min.in, heat.in,
+# equi.in, prod.in from the XYN pipeline (they're protein-agnostic).
+#
+# Cys4-Cys32 disulfide confirmed from the 1KS4 crystal: SSBOND record + 2.03 A
+# SG-SG distance measured directly from coordinates -- declared explicitly
+# below, same fix as tleap_Q4.in (tleap does not auto-detect disulfides).
+
+# 1. Load the standard force fields
+source leaprc.protein.ff14SB
+source leaprc.water.tip3p
+
+# 3. Load the prepared 1KS4 structure (see prep note below)
+mol = loadpdb 1ks4_ready.pdb
+
+# 4. Disulfide bond: Cys4-Cys32 (SG-SG = 2.03 A, confirmed from crystal coordinates)
+bond mol.4.SG mol.32.SG
+
+# 5. Create the solvent box and neutralize
+solvateOct mol TIP3PBOX 10.0
+addIons mol Na+ 0
+addIons mol Cl- 0
+
+# 6. Save files
+saveamberparm mol system.prmtop system.inpcrd
+quit
