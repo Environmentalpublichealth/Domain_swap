@@ -41,7 +41,7 @@ echo "Protein System" | gmx_mpi trjconv -s prod_1.tpr -f prod_1.xtc -o prod_cent
 echo "Backbone System" | gmx_mpi trjconv -s prod_1.tpr -f prod_center.xtc -o prod_final.xtc -fit rot+trans
 
 # C. RMSD (backbone)
-echo "Backbone Backbone" | gmx_mpi rmsd -s prod_1.tpr -f prod_final.xtc -o rmsd_${TAG}.xvg -tu ns
+echo "Backbone Backbone" | gmx_mpi rms -s prod_1.tpr -f prod_final.xtc -o rmsd_${TAG}.xvg -tu ns
 
 # D. Per-residue RMSF (backbone)
 echo "Backbone" | gmx_mpi rmsf -s prod_1.tpr -f prod_final.xtc -o rmsf_${TAG}.xvg -res
