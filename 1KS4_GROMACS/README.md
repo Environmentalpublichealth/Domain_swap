@@ -4,7 +4,7 @@ Force field: AMBER ff14SB + TIP3P, built via `tleap`, converted to GROMACS
 format and run with `gmx_mpi` (same convention as the XYN WT/Q4 systems —
 ff14SB parameters, GROMACS engine, not AMBER's pmemd/sander).
 
-Structure: PDB 1KS4 (A. niger GH9 endoglucanase). Native disulfide
+Structure: PDB 1KS4 (A. niger GH12 endoglucanase, EglA, EC 3.2.1.4). Native disulfide
 Cys4-Cys32 (crystal SG-SG 2.03 Å).
 
 ## Directory layout
