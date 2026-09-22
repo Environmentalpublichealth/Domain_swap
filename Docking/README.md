@@ -17,7 +17,7 @@ There should be a output file `Eg1A_WT_AF3_model_0_H.pdb` produced in the same d
 Each structure should have their own box site to dock, we create it by running the script in here.
 ```
 # download the make_site_box.sh script
-wget 
+wget https://raw.githubusercontent.com/Environmentalpublichealth/Domain_swap/refs/heads/main/Docking/make_site_box.sh
 make_site_box.sh
 ```
 This will output a folder named `autobox`, and it should have one _site.pdb file for each protein structure. 
