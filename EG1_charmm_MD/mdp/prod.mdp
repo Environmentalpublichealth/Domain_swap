@@ -1,11 +1,11 @@
-; Stage 3/3: 200 ns unrestrained production. Identical for all six systems.
+; Stage 3/3: 100 ns unrestrained production. Identical for every system.
 ;
-; NO `define` line. A stray one here would restrain the entire 200 ns and the
+; NO `define` line. A stray one here would restrain the entire 100 ns and the
 ; RMSF would come out near zero -- silent, expensive, and entirely
 ; plausible-looking. submit.sh and run_md.batch both refuse to start if a define
 ; appears in this file.
 integrator              = md
-nsteps                  = 100000000 ; 200 ns @ 2 fs   <-- config.sh PROD_NS
+nsteps                  = 50000000  ; 100 ns @ 2 fs   <-- config.sh PROD_NS
 dt                      = 0.002
 continuation            = yes
 constraint_algorithm    = lincs
@@ -43,7 +43,7 @@ ref_p                   = 1.0
 compressibility         = 4.5e-5
 gen_vel                 = no
 
-; 10 ps/frame -> 20001 frames over 200 ns, per system per replicate.
+; 10 ps/frame -> 10001 frames over 100 ns, per system per replicate.
 nstxout-compressed      = 5000
 compressed-x-grps       = System
 nstenergy               = 5000

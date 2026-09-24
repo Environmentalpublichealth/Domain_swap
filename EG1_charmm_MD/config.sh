@@ -84,8 +84,8 @@ SALT_MM=150                # bulk NaCl on top of neutralisation
 
 NVT_PS=500                 # heavy atoms restrained (+ ligand, in holo)
 NPT_NS=2                   # backbone restrained; ligand free
-PROD_NS=200                # unrestrained production
-FRAME_PS=10                # -> 20001 frames per replicate
+PROD_NS=100                # unrestrained production
+FRAME_PS=10                # -> 10001 frames per replicate
 
 N_REPS=2                   # independent replicates, reported individually
 

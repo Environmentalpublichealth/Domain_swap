@@ -81,7 +81,7 @@ echo "=========================================================="
 [ -s prod_1.tpr ] || { echo "FATAL: no prod_1.tpr here."; exit 1; }
 [ -s prod_1.xtc ] || { echo "FATAL: no prod_1.xtc here."; exit 1; }
 if [ ! -s prod_1.gro ]; then
-  echo "*** WARNING: prod_1.gro absent -- production has not reached ${PROD_NS:-200} ns."
+  echo "*** WARNING: prod_1.gro absent -- production has not reached ${PROD_NS:-100} ns."
   echo "*** Analysing the partial trajectory anyway; note the length in the RMSD plot."
 fi
 

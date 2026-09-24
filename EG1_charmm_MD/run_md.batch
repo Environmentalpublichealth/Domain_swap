@@ -22,7 +22,7 @@
 
 # ONE SCRIPT, ALL SIX SYSTEMS, ALL THREE REPLICATES. Runs the full chain for one
 # replicate:
-#   min -> 500 ps NVT (restrained) -> 2 ns NPT (backbone) -> 200 ns production
+#   min -> 500 ps NVT (restrained) -> 2 ns NPT (backbone) -> 100 ns production
 #
 # Which system it runs is decided by WHERE it is submitted from, not by an edit:
 # it is submitted from runs/<system>/repN/ and reads the shared mdp/ above that.
@@ -238,7 +238,7 @@ if [ "${HAS_LIGAND}" = "1" ]; then
 fi
 
 # prod.mdp must NOT be restrained. A stray `define` there restrains the whole
-# 200 ns and the RMSF comes out near zero -- silent, expensive, plausible.
+# 100 ns and the RMSF comes out near zero -- silent, expensive, plausible.
 if awk -F';' '{print $1}' "${MDP}/prod.mdp" | grep -qE '^[[:space:]]*define[[:space:]]*=[[:space:]]*-D'; then
   echo "FATAL: ${MDP}/prod.mdp sets a -D define. Production must be UNRESTRAINED."
   exit 1
@@ -622,7 +622,7 @@ if [ ! -s prod_1.gro ]; then
   fi
 else
   echo ""
-  echo "ALL STAGES COMPLETE -- ${SYSTEM} ${REP}, ${PROD_NS:-200} ns production done."
+  echo "ALL STAGES COMPLETE -- ${SYSTEM} ${REP}, ${PROD_NS:-100} ns production done."
   echo "Remember: ${N_REPS:-2} replicates, reported individually -- never averaged into"
   echo "          one curve with an error band."
 fi

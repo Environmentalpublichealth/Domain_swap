@@ -20,9 +20,9 @@ independent replicates of:
 | minimisation | ≤50 000 steps | heavy atoms | remove build clashes |
 | NVT | 500 ps | heavy atoms | reach 300 K |
 | NPT | 2 ns | backbone only | reach the right density; ligand free to settle |
-| production | 200 ns | none | the data |
+| production | 100 ns | none | the data |
 
-2 fs steps, frames every 10 ps → 20 001 frames per replicate. CHARMM36m with
+2 fs steps, frames every 10 ps → 10 001 frames per replicate. CHARMM36m with
 CHARMM-modified TIP3P, 150 mM NaCl, dodecahedral box with 1.2 nm padding, 300 K.
 
 **Replicates are independent experiments and are reported individually.** Nothing
@@ -49,7 +49,7 @@ cd /engrfs/project/joshua.yuan/Haina
 mkdir -p $USER && cd $USER
 ```
 
-A 200 ns replicate is a few GB. Three replicates × several systems will not fit
+A 100 ns replicate is a couple of GB. Three replicates × several systems will not fit
 in home, and filling home breaks your login in confusing ways.
 
 **Never run simulations on the login node.** It is for editing, copying and
@@ -334,8 +334,8 @@ srun -p general-cpu -c 4 -A <your-account> -J prep --pty /bin/bash
 ./submit.sh                     # every system in systems/
 ```
 
-Each replicate gets `runs/<system>/rep<N>/` and its own GPU job. 200 ns does not
-fit in one 24 h job and is not meant to: each job runs until its wall limit,
+Each replicate gets `runs/<system>/rep<N>/` and its own GPU job. 100 ns does not
+fit in one job and is not meant to: each job runs until its wall limit,
 checkpoints, and **submits its own continuation** (up to `MAXCHAIN`). You submit
 once.
 

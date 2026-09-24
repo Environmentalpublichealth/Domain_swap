@@ -10,7 +10,7 @@
 # genuinely independent starting velocities. They are INDEPENDENT EXPERIMENTS
 # and get reported individually -- never collapsed into a mean with error bars.
 #
-# Each chain self-resubmits across 48 h wall boundaries until its 200 ns is done.
+# Each chain self-resubmits across wall boundaries until its 100 ns is done.
 # You submit once.
 set -e
 
@@ -94,7 +94,7 @@ for stage in nvt npt prod; do
   done
 done
 
-# Production must be unrestrained. A stray define here restrains the whole 200 ns
+# Production must be unrestrained. A stray define here restrains the whole 100 ns
 # and the RMSF comes out near zero -- silent, expensive, plausible-looking.
 d=$(mdpval mdp/prod.mdp define)
 [ -z "${d}" ] || { echo "ERROR: mdp/prod.mdp sets define='${d}'. Production must be UNRESTRAINED."; bad=1; }
