@@ -66,10 +66,8 @@ already has:
 
 | needed | notes |
 |---|---|
-| `bash` | the scripts are plain bash, no arrays-of-arrays or GNU-only flags |
 | `python3` | **standard library only** — `os`, `sys`, `re`, `math`, `glob`. No numpy, scipy, rdkit, MDAnalysis. Nothing to `pip install`, no conda environment, no `module load python` unless `python3` is missing entirely |
 | `apptainer` (or `singularity`) | to run the GROMACS container |
-| SLURM | `sbatch`, `squeue`, `scontrol` |
 
 Check in one line:
 
@@ -85,7 +83,7 @@ is far newer than that.
 From your laptop:
 
 ```bash
-git clone <your-repo-url>            # or: scp -r EG1_charmm_MD <netID>@ssh-shell-3.engr.wustl.edu:...
+scp -r EG1_charmm_MD <netID>@ssh-shell-3.engr.wustl.edu:...  # or your own way to transfer the entire folder to your working directory
 cd EG1_charmm_MD
 ```
 
@@ -121,6 +119,8 @@ sinfo -p general-gpu -o "%P %G %l"
 If the shard type is spelled differently there, change `GRES` in `config.sh` to
 match it exactly. One shard is enough for one GROMACS replicate; ask for more
 only if a run turns out to be GPU-bound.
+
+We prefer to use A100 GPU, because it is newer and more powerful than a6000. If your job stay pending for too long, check what A100 GPUs are available with the `sinfo` command. 
 
 ### No walltime is requested
 
