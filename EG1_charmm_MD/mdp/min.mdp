@@ -1,0 +1,26 @@
+; Stage 0/3: steepest-descent minimisation. Identical for all six systems.
+integrator      = steep
+emtol           = 1000.0
+emstep          = 0.01
+nsteps          = 50000
+nstlist         = 1
+cutoff-scheme   = Verlet
+
+; ===== NONBONDED: CHARMM36m ==================================================
+; Force-switch 1.0 -> 1.2 nm with NO analytic dispersion correction. This is not
+; a style preference. CHARMM36 was parameterised WITH the force-switch potential;
+; running it under a plain cutoff, or adding DispCorr on top, shifts the
+; energetics measurably. The CHARMM36 carbohydrate parameters used for the
+; xylohexaose come from the same release and want the same treatment, which is
+; part of why the ligand is built from carb.rtp rather than from CGenFF.
+vdwtype                 = cutoff
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+rlist                   = 1.2
+coulombtype             = PME
+rcoulomb                = 1.2
+pme_order               = 4
+fourierspacing          = 0.16
+DispCorr                = no
+; =============================================================================

@@ -1,0 +1,13 @@
+model	backbone	glu_pair	pair_dist	center_x	center_y	center_z
+1ks5_WT_AF3_model_0	1ks5	GLU116/GLU204	6.9	2.195	-2.731	6.173
+1xyn_apo_model	1xyn	GLU75/GLU164	6.3	6.669	1.265	-2.791
+fold_m02_1ks5backbone_1xyninsert_model_0	1ks5	GLU116/GLU204	6.8	5.644	1.645	4.718
+fold_m02_1xynbackbone_1ks5insert_model_0	1xyn	GLU75/GLU164	6.2	-2.486	6.218	1.977
+fold_m03_1ks5backbone_1xyninsert_model_0	1ks5	GLU116/GLU204	7.0	-1.311	-4.009	-5.248
+fold_m03_1xynbackbone_1ks5insert_model_0	1xyn	GLU75/GLU164	5.8	5.857	-3.015	-3.595
+fold_m05_1ks5backbone_1xyninsert_model_0	1ks5	GLU116/GLU204	7.0	-5.327	-3.086	3.286
+fold_m05_1xynbackbone_1ks5insert_model_0	1xyn	GLU75/GLU164	6.1	-3.437	-0.903	-7.461
+fold_m08_1ks5backbone_1xyninsert_model_0	1ks5	GLU116/GLU204	6.9	-5.335	1.589	-2.373
+fold_m08_1xynbackbone_1ks5insert_model_0	1xyn	GLU75/GLU164	6.2	-2.451	5.463	-1.566
+fold_m12_1ks5backbone_1xyninsert_model_0	1ks5	GLU116/GLU204	6.9	-7.792	-3.750	-4.408
+fold_m12_1xynbackbone_1ks5insert_model_0	1xyn	GLU75/GLU164	6.4	-3.414	-7.234	2.745

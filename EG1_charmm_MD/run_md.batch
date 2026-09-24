@@ -1,0 +1,628 @@
+#!/bin/bash
+#SBATCH -p general-gpu
+#SBATCH -A engr-lab-joshua.yuan
+#SBATCH --gres="shard:a100-sxm4:1"
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 8
+#SBATCH --mem=16G
+#SBATCH -J eg1
+# No --time on purpose: the job takes the partition default, and this script
+# reads the limit it was actually granted (see slurm_timelimit_h below) rather
+# than trusting a number written here.
+#SBATCH --output=gmx_%x_%j.log
+# Deliberately NO --error: with only --output, SLURM merges stderr into the same
+# file. The lab's GNINA example splits them, but GROMACS writes most of what you
+# want to read to stderr, and this script's own progress lines go to stdout --
+# split across two files, neither tells the whole story, and the resume logic
+# below (which greps one log for both) would miss half of it.
+# These are DEFAULTS ONLY. submit.sh passes the real partition, account, gres,
+# cpus and walltime from config.sh on the command line, which overrides every
+# directive above, and re-applies them on each self-resubmit. Edit config.sh.
+
+# ONE SCRIPT, ALL SIX SYSTEMS, ALL THREE REPLICATES. Runs the full chain for one
+# replicate:
+#   min -> 500 ps NVT (restrained) -> 2 ns NPT (backbone) -> 200 ns production
+#
+# Which system it runs is decided by WHERE it is submitted from, not by an edit:
+# it is submitted from runs/<system>/repN/ and reads the shared mdp/ above that.
+# There is deliberately no second copy of this file -- copies drift, and a
+# drifted runner silently invalidates the comparison between systems. submit.sh
+# does the submitting.
+#
+# 202.5 ns per replicate does NOT fit in one 48 h job, and is not expected to.
+# The chain resumes at two levels and re-queues itself until it is done:
+#
+#   BETWEEN STAGES  a stage is COMPLETE when its .gro exists (mdrun writes it
+#                   only after the final step), so finished stages are skipped.
+#   WITHIN A STAGE  a stage with a .cpt but no .gro is resumed with
+#                   `-cpi <name>.cpt -append`, restarting from the exact step,
+#                   time, velocities and (for NPT) box and barostat state in the
+#                   checkpoint, appending to the existing .xtc/.edr/.log. The
+#                   result is equivalent to an uninterrupted run.
+#
+# Supporting machinery:
+#   * every mdrun gets -maxh set to the wall time ACTUALLY REMAINING in this job,
+#     so it stops cleanly and checkpoints instead of being SIGKILLed mid-write
+#   * -cpt 15 checkpoints every 15 min, so a hard kill costs at most 15 min
+#   * if <name>.cpt is unreadable (killed mid-write) it falls back to
+#     <name>_prev.cpt, which is exactly what GROMACS keeps it for
+#   * an unfinished chain resubmits itself, but ONLY if the checkpoint actually
+#     ADVANCED this job -- a crash that makes no progress stops the chain rather
+#     than burning every link on the same failure
+
+set -e
+
+# The wall-clock budget is measured from HERE -- the very first statement -- so
+# everything the job does, `module load` included, is inside it.
+JOB_START=$(date +%s)
+
+# ------------------------------------------------------------------ locate self
+# Submitted from runs/<system>/repN/, so ../../.. is the pipeline root.
+PIPELINE_ROOT=$(cd ../../.. && pwd)
+SYSTEM=$(basename "$(cd .. && pwd)")
+REP=$(basename "$(pwd)")
+MDP="${PIPELINE_ROOT}/mdp"
+
+if [ ! -d "${MDP}" ]; then
+  echo "FATAL: no mdp directory at ${MDP}"
+  echo "       This script must be submitted from runs/<system>/repN/ inside the"
+  echo "       pipeline directory. Use ./submit.sh, which does that for you."
+  exit 1
+fi
+
+# ${MDP} and ${PIPELINE_ROOT} are interpolated UNQUOTED into grompp's argument
+# list (they must be: ${MDRUN}/${GROMPP} depend on word splitting). A space in
+# the path would split a filename into two arguments.
+case "${PIPELINE_ROOT}" in
+  *[[:space:]]*)
+    echo "FATAL: the pipeline path contains a space:"
+    echo "         ${PIPELINE_ROOT}"
+    echo "       Move it somewhere without spaces and resubmit."
+    exit 1 ;;
+esac
+
+if [ -r "${PIPELINE_ROOT}/config.sh" ]; then
+  # shellcheck source=/dev/null
+  source "${PIPELINE_ROOT}/config.sh"
+fi
+if [ -r "${PIPELINE_ROOT}/systems/${SYSTEM}.conf" ]; then
+  # shellcheck source=/dev/null
+  source "${PIPELINE_ROOT}/systems/${SYSTEM}.conf"
+fi
+# GROMACS lives in an Apptainer container here, not a module. gmx.sh sets ${GMX}
+# to the full `apptainer exec --nv ... /usr/local/gromacs/<arch>/bin/gmx` line,
+# or honours a GMX already set in the environment.
+# shellcheck source=/dev/null
+source "${PIPELINE_ROOT}/gmx.sh"
+gmx_check || exit 1
+
+# system.top contains `#include "charmm36-jul2022.ff/..."`, a path relative to
+# the FORCE FIELD SEARCH PATH -- not to the .top file. grompp runs from
+# runs/<system>/repN/, where no charmm36*.ff exists, and CHARMM36m is not part of
+# the GROMACS installation either. Without GMXLIB every grompp fails with
+# "Topology include file not found".
+export GMXLIB="${PIPELINE_ROOT}${GMXDATA:+:${GMXDATA}/top}"
+
+# Suppresses OpenMPI's "libcuda not found" notice. Expected and harmless on
+# CPU-only nodes; do not read it as an error in the logs.
+export OMPI_MCA_opal_warn_on_missing_libcuda=0
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=^openib
+
+MAXH_TOTAL=${MAXH_TOTAL:-${MAXH:-23.5}}
+
+# --- Reconcile the budget with the wall limit SLURM ACTUALLY GRANTED ---------
+# No --time is requested, so the partition default applies and only the
+# scheduler knows what it is -- config.sh is not the authority here. If MAXH ever exceeds the real limit, mdrun
+# would still be running when SLURM SIGKILLs the job, and the consequence is
+# worse than losing the last stage: THIS SCRIPT dies too, so the self-resubmit
+# never runs and the chain stops silently. You would come back days later to a
+# replicate that simply stopped, with no error anywhere.
+slurm_timelimit_h () {
+  local tl
+  [ -n "${SLURM_JOB_ID}" ] || return 1
+  command -v scontrol >/dev/null 2>&1 || return 1
+  tl=$(scontrol show job "${SLURM_JOB_ID}" 2>/dev/null \
+       | tr ' ' '\n' | awk -F= '/^TimeLimit=/{print $2; exit}')
+  [ -n "${tl}" ] || return 1
+  case "${tl}" in UNLIMITED|Unknown|INVALID|NONE) return 1 ;; esac
+  echo "${tl}" | awk '
+    { d=0; s=$0
+      if (split(s, a, "-") == 2) { d=a[1]; s=a[2] }
+      m = split(s, b, ":")
+      if      (m==3) { h=b[1]; mi=b[2]; se=b[3] }
+      else if (m==2) { h=0;    mi=b[1]; se=b[2] }
+      else           { h=0;    mi=b[1]; se=0    }
+      printf "%.3f", d*24 + h + mi/60 + se/3600 }'
+}
+
+WALL_ACTUAL=$(slurm_timelimit_h || true)
+if [ -n "${WALL_ACTUAL}" ]; then
+  WALL_SAFE=$(awk -v w="${WALL_ACTUAL}" 'BEGIN{printf "%.3f", w - 0.5}')
+  if awk -v a="${MAXH_TOTAL}" -v s="${WALL_SAFE}" 'BEGIN{exit !(a > s)}'; then
+    echo "*** NOTE: MAXH=${MAXH_TOTAL} h exceeds the safe budget for this job's actual"
+    echo "***       SLURM wall limit of ${WALL_ACTUAL} h. Clamping to ${WALL_SAFE} h so"
+    echo "***       mdrun stops cleanly and this script survives to resubmit."
+    MAXH_TOTAL="${WALL_SAFE}"
+  fi
+elif [ -n "${WALL_H}" ]; then
+  WALL_SAFE=$(awk -v w="${WALL_H}" 'BEGIN{printf "%.3f", w - 0.5}')
+  if awk -v a="${MAXH_TOTAL}" -v s="${WALL_SAFE}" 'BEGIN{exit !(a > s)}'; then
+    echo "*** NOTE: MAXH=${MAXH_TOTAL} h leaves no margin under config.sh WALL_H=${WALL_H} h."
+    echo "***       Clamping to ${WALL_SAFE} h."
+    MAXH_TOTAL="${WALL_SAFE}"
+  fi
+fi
+
+# The container ships a thread-MPI build, so there is no mpirun and no srun in
+# front of anything: one process, one GPU, ${NTOMP} OpenMP threads. That also
+# avoids the PMI_Abort trap of MPI builds, where a fatal GROMACS error cancels
+# the whole SLURM step and takes the log with it.
+NTOMP=${NTOMP:-${SLURM_CPUS_PER_TASK:-${GPU_CPUS:-8}}}
+GROMPP=${GROMPP:-"${GMX} grompp"}
+# GPU offload comes from config.sh (GPU_FLAGS), so every replicate of every
+# system is offloaded identically -- mixed CPU/GPU replicates are not comparable.
+MDRUN=${MDRUN:-"${GMX} mdrun ${GPU_FLAGS:--nb gpu -pme gpu -bonded gpu} -ntmpi 1 -ntomp ${NTOMP} -pin on"}
+
+remaining_h () {
+  local now; now=$(date +%s)
+  awk -v s="${JOB_START}" -v n="${now}" -v tot="${MAXH_TOTAL}" \
+      'BEGIN{ printf "%.3f", tot - (n-s)/3600 }'
+}
+
+# Last completed MD step for a stage, from its .log.
+last_step () {
+  local f="$1.log" v
+  [ -s "${f}" ] || { echo 0; return; }
+  v=$(grep -A1 -E '^ *Step +Time' "${f}" 2>/dev/null | tail -1 | awk '{printf "%d", $1+0}')
+  # MUST fall back to 0, never to empty. awk prints nothing when its input has no
+  # lines, and that happens for real: mdrun writes the .log header immediately
+  # but the first Step/Time block only after step 0 completes, so any crash in
+  # the first seconds (a DD failure, an OOM kill, a node dying) leaves a
+  # non-empty log with no step in it. An empty value makes every downstream
+  # `[ x -gt y ]` abort with "integer expression expected", which makes the
+  # "failed without advancing" test evaluate FALSE -- and the crash then gets
+  # misreported as a clean wall-time stop and resubmitted into itself.
+  echo "${v:-0}"
+}
+
+mdp_nsteps () {
+  awk -F';' '{print $1}' "$1" \
+    | awk -F'=' '/^[ \t]*nsteps/{gsub(/[ \t]/,"",$2); print $2; exit}'
+}
+
+# ------------------------------------------------------------------- preflight
+echo "=========================================================="
+echo "host       : $(hostname)"
+echo "job        : ${SLURM_JOB_ID:-<none>}  ${SLURM_JOB_NAME:-}"
+echo "ntasks     : ${SLURM_NTASKS:-<unset>}"
+echo "cwd        : $(pwd)"
+echo "system     : ${SYSTEM}  ${REP}   (ligand: ${HAS_LIGAND:-?})"
+echo "mdp dir    : ${MDP}"
+echo "wall budget: ${MAXH_TOTAL} h of mdrun time  (SLURM grants ${WALL_ACTUAL:-${WALL_H:-?}} h)"
+echo "chain link : ${EG1_CHAIN:-1} of ${MAXCHAIN:-12}"
+echo "started    : $(date)"
+echo "=========================================================="
+
+fail=0
+NEED="${MDP}/min.mdp ${MDP}/nvt.mdp ${MDP}/npt.mdp ${MDP}/prod.mdp
+      system.gro system.top posre.itp posre_backbone.itp"
+if [ "${HAS_LIGAND}" = "1" ]; then
+  NEED="${NEED} glycan.itp posre_lig.itp"
+fi
+for f in ${NEED}; do
+  if [ -s "${f}" ]; then echo "  ok      ${f}"; else echo "  MISSING ${f}"; fail=1; fi
+done
+[ "${fail}" -eq 0 ] || { echo ""; echo "FATAL: required input missing. Nothing was run."; exit 1; }
+
+# Both restraint blocks must be wired in, or -DPOSRES/-DPOSRES_BB silently
+# restrain nothing and 2.5 ns of "restrained" equilibration runs completely free.
+for d in POSRES POSRES_BB; do
+  grep -q "#ifdef ${d}" system.top \
+    || { echo "FATAL: system.top has no '#ifdef ${d}' block."; exit 1; }
+done
+echo "  ok      system.top wires POSRES and POSRES_BB"
+
+# For holo, the ligand must actually be in the topology -- a merge that silently
+# did nothing would run the apo system under a holo name, which is the single
+# most confusing failure this pipeline could produce.
+if [ "${HAS_LIGAND}" = "1" ]; then
+  grep -qE '^[[:space:]]*#include[[:space:]]+"glycan\.itp"' system.top \
+    || { echo "FATAL: ${SYSTEM} is a holo system but system.top does not include"
+         echo "       glycan.itp. This would run as apo under a holo name."; exit 1; }
+  grep -q "#ifdef POSRES" glycan.itp \
+    || { echo "FATAL: glycan.itp has no POSRES block, so the ligand would be"
+         echo "       unrestrained during NVT while the protein is frozen."; exit 1; }
+  echo "  ok      glycan.itp is included and carries its POSRES block"
+fi
+
+# prod.mdp must NOT be restrained. A stray `define` there restrains the whole
+# 200 ns and the RMSF comes out near zero -- silent, expensive, plausible.
+if awk -F';' '{print $1}' "${MDP}/prod.mdp" | grep -qE '^[[:space:]]*define[[:space:]]*=[[:space:]]*-D'; then
+  echo "FATAL: ${MDP}/prod.mdp sets a -D define. Production must be UNRESTRAINED."
+  exit 1
+fi
+echo "  ok      prod.mdp is unrestrained"
+
+# ...and the inverse, which matters just as much.
+for pair in "nvt:POSRES" "npt:POSRES_BB"; do
+  stage="${pair%%:*}"; want="${pair##*:}"
+  if awk -F';' '{print $1}' "${MDP}/${stage}.mdp" \
+       | grep -qE "^[[:space:]]*define[[:space:]]*=.*-D${want}([[:space:]]|$)"; then
+    echo "  ok      ${stage}.mdp defines -D${want}"
+  else
+    echo "FATAL: ${MDP}/${stage}.mdp does not define -D${want}. That stage is"
+    echo "       supposed to be position-restrained; without the define it would"
+    echo "       run completely free and nothing would say so."
+    exit 1
+  fi
+done
+
+# Every #include in system.top must resolve, or grompp dies at the first stage --
+# after the job has queued and started.
+missing_inc=0
+while read -r inc; do
+  if [ -e "${inc}" ] || [ -e "${PIPELINE_ROOT}/${inc}" ]; then
+    echo "  ok      include ${inc}"
+  else
+    echo "  MISSING include ${inc}  (searched . and ${PIPELINE_ROOT})"
+    missing_inc=1
+  fi
+done < <(grep -oE '^[[:space:]]*#include[[:space:]]+"[^"]+"' system.top \
+         | sed -E 's/.*"([^"]+)".*/\1/')
+if [ "${missing_inc}" -ne 0 ]; then
+  echo ""
+  echo "FATAL: a topology #include cannot be resolved. If it is the force field,"
+  echo "       run ./01_get_charmm36m.sh in ${PIPELINE_ROOT} and resubmit."
+  exit 1
+fi
+
+echo ""
+echo "state on entry:"
+for s in min nvt npt prod_1; do
+  case "${s}" in
+    prod_1) tot=$(mdp_nsteps ${MDP}/prod.mdp) ;;
+    *)      tot=$(mdp_nsteps ${MDP}/${s}.mdp) ;;
+  esac
+  if [ -s "${s}.gro" ]; then
+    echo "  COMPLETE    ${s}"
+  elif [ -s "${s}.cpt" ] || [ -s "${s}_prev.cpt" ]; then
+    echo "  partial     ${s}  at step $(last_step ${s}) of ${tot:-?}  -- will resume here"
+  else
+    echo "  not started ${s}"
+  fi
+done
+
+PROGRESS=0
+
+# grompp, with transient SCHEDULER failures separated from real topology errors.
+#
+# This exists because of a real failure: `srun -n 1 gmx_mpi grompp` returned 1
+# with
+#     srun: error: Unable to confirm allocation for job NNNN: Socket timed out
+#     srun: Check SLURM_JOB_ID environment variable. Expired or invalid job NNNN
+# grompp never ran at all -- slurmctld was briefly unreachable. The topology was
+# perfectly good (the same command had just succeeded three times for min, nvt
+# and npt), but the chain classified it as "fix the mdp or the topology" and
+# refused to resubmit, stranding the replicate with its production not started.
+#
+# So: a message that names the SCHEDULER is retried; anything else is still
+# treated as a genuine rejection and still stops the chain, because resubmitting
+# into a broken topology would burn every link on the same error.
+GROMPP_DIRECT=${GROMPP_DIRECT:-"gmx_mpi grompp"}
+GROMPP_TRANSIENT=0
+GROMPP_RETRY_SLEEP=${GROMPP_RETRY_SLEEP:-60}
+
+grompp_try () {   # grompp_try <name.tpr> <grompp args...>   0 ok / 1 real error / 2 scheduler
+  local tpr=$1; shift
+  local log="grompp_${tpr%.tpr}.log"
+  local attempt rc
+  GROMPP_TRANSIENT=0
+  for attempt in 1 2 3; do
+    ${GROMPP} "$@" -o "${tpr}" -maxwarn 1 > "${log}" 2>&1
+    rc=$?
+    cat "${log}"
+    if [ "${rc}" -eq 0 ] && [ -s "${tpr}" ]; then return 0; fi
+    if grep -qiE "Unable to confirm allocation|Socket timed out|Expired or invalid job|slurm_receive_msg|Communication connection failure|Zero Bytes were transmitted" "${log}"; then
+      echo "*** srun could not reach the SLURM controller (attempt ${attempt} of 3)."
+      echo "*** That is a scheduler hiccup, not a topology problem."
+      echo "*** Retrying in ${GROMPP_RETRY_SLEEP} s."
+      rm -f "${tpr}"
+      sleep "${GROMPP_RETRY_SLEEP}"
+      continue
+    fi
+    return 1
+  done
+  # Last resort: bypass srun entirely. Bounded by `timeout` because a bare
+  # MPI-linked binary inside a multi-task allocation can block in MPI_Init, and
+  # a hang would burn the whole wall limit instead of failing.
+  if command -v timeout >/dev/null 2>&1; then
+    echo "*** srun still unreachable; trying grompp directly under a 5 min timeout."
+    timeout 300 ${GROMPP_DIRECT} "$@" -o "${tpr}" -maxwarn 1 > "${log}" 2>&1
+    rc=$?
+    cat "${log}"
+    if [ "${rc}" -eq 0 ] && [ -s "${tpr}" ]; then
+      echo "*** Direct grompp succeeded."
+      return 0
+    fi
+  fi
+  GROMPP_TRANSIENT=1
+  return 2
+}
+
+# run_stage <name> <grompp args...>
+#   0  stage finished (<name>.gro written)
+#   2  stopped on wall time, checkpointed -- normal, resume next job
+#   3  mdrun failed WITHOUT advancing -- a real error, do not resubmit
+run_stage () {
+  local name=$1; shift
+  local left step_before step_after mdrun_rc grompp_rc cpt
+
+  if [ -s "${name}.gro" ]; then
+    echo ""; echo "----- ${name}: already complete (${name}.gro exists), skipping -----"
+    return 0
+  fi
+
+  left=$(remaining_h)
+  echo ""
+  echo "----- ${name} : $(date) : ${left} h of wall remaining -----"
+  if awk -v l="${left}" 'BEGIN{exit !(l < 0.25)}'; then
+    echo "Less than 15 min left -- stopping here rather than starting ${name}."
+    return 2
+  fi
+
+  step_before=$(last_step "${name}")
+
+  # GROMACS keeps <name>_prev.cpt as the previous good copy precisely so a kill
+  # during a checkpoint write is survivable. Without this fallback such a job
+  # would restart the stage from step 0 and silently discard days of computing.
+  cpt=""
+  if [ -s "${name}.cpt" ]; then
+    cpt="${name}.cpt"
+  elif [ -s "${name}_prev.cpt" ]; then
+    cpt="${name}_prev.cpt"
+    echo "NOTE: ${name}.cpt is missing or empty; falling back to ${name}_prev.cpt."
+  fi
+
+  set +e
+  if [ -n "${cpt}" ]; then
+    echo "Resuming ${name} from ${cpt} (step ${step_before})."
+    ${MDRUN} -v -deffnm "${name}" -cpi "${cpt}" -append \
+             -maxh "${left}" -cpt 15
+    mdrun_rc=$?
+    # A corrupt primary checkpoint can fail at READ time rather than be empty.
+    if [ "${mdrun_rc}" -ne 0 ] && [ "${cpt}" = "${name}.cpt" ] && [ -s "${name}_prev.cpt" ]; then
+      echo "Resume from ${name}.cpt failed (rc=${mdrun_rc}); retrying from ${name}_prev.cpt."
+      ${MDRUN} -v -deffnm "${name}" -cpi "${name}_prev.cpt" -append \
+               -maxh "$(remaining_h)" -cpt 15
+      mdrun_rc=$?
+    fi
+  else
+    if [ ! -s "${name}.tpr" ]; then
+      grompp_try "${name}.tpr" "$@"
+      grompp_rc=$?
+      if [ "${grompp_rc}" -eq 2 ]; then
+        set -e
+        echo "----- ${name}: grompp could not RUN -- the scheduler was unreachable, -----"
+        echo "----- not a topology problem. Nothing is wrong with this system; the -----"
+        echo "----- next job should get through. Resubmitting. -----"
+        return 4
+      fi
+      # Caught HERE rather than letting mdrun fail on the missing tpr: otherwise
+      # a bad topology or mdp is reported as "mdrun FAILED" and the real error is
+      # buried an unrelated stage away.
+      if [ "${grompp_rc}" -ne 0 ] || [ ! -s "${name}.tpr" ]; then
+        set -e
+        echo "----- ${name}: grompp FAILED (rc=${grompp_rc}). Not a wall-time stop. -----"
+        echo "----- Fix the mdp or the topology; a resubmit would only repeat it. -----"
+        return 3
+      fi
+    fi
+    ${MDRUN} -v -deffnm "${name}" -maxh "${left}" -cpt 15
+    mdrun_rc=$?
+  fi
+  set -e
+
+  step_after=$(last_step "${name}")
+  echo "----- ${name}: step ${step_before} -> ${step_after} (mdrun rc=${mdrun_rc}) -----"
+  if [ "${step_after}" -gt "${step_before}" ]; then PROGRESS=1; fi
+
+  if [ -s "${name}.gro" ]; then
+    echo "----- ${name}: COMPLETE -----"
+    return 0
+  fi
+
+  if [ "${mdrun_rc}" -ne 0 ] && [ "${step_after}" -le "${step_before}" ]; then
+    echo "----- ${name}: mdrun FAILED (rc=${mdrun_rc}) without advancing. Not a wall stop. -----"
+    if grep -qiE "no domain decomposition|not compatible with the given box|minimum cell size" \
+         "${name}.log" gmx_*.log 2>/dev/null; then
+      echo ""
+      echo "*** This is a DOMAIN DECOMPOSITION failure, not a physics problem."
+      echo "*** Every DD cell must be at least rlist = 1.2 nm across, and a"
+      echo "*** dodecahedron's short axis is only 0.707 x the box vector."
+      echo "*** FIX: lower NTASKS in ${PIPELINE_ROOT}/config.sh (try 16), then"
+      echo "***      resubmit this replicate:"
+      echo "***        cd $(pwd) && sbatch --ntasks=16 --job-name=${SLURM_JOB_NAME:-xyn} ${PIPELINE_ROOT}/run_md.batch"
+      echo "*** Nothing is corrupted; this stage simply never started."
+    fi
+    return 3
+  fi
+  echo "----- ${name}: stopped at step ${step_after}, checkpointed. Resumes here next job. -----"
+  return 2
+}
+
+# --- the chain --------------------------------------------------------------
+if [ ! -s min.gro ]; then
+  echo ""; echo "----- minimisation : $(date) -----"
+  if [ ! -s min.tpr ]; then
+    # NOT `[ -s min.tpr ] || ${GROMPP} ...` -- under `set -e` a failing `||` list
+    # exits the script instantly, printing nothing at all. The whole rest of this
+    # file is careful to say WHY it stopped; minimisation has to be too, because
+    # a bad topology or mdp shows up here first and this is the message you would
+    # be reading.
+    set +e
+    grompp_try min.tpr -f ${MDP}/min.mdp -c system.gro -p system.top
+    grompp_rc=$?
+    set -e
+    if [ "${grompp_rc}" -eq 2 ]; then
+      echo ""
+      echo "grompp of min.mdp could not RUN -- the scheduler was unreachable, not a"
+      echo "topology problem. Requeueing; the next job should get through."
+      sbatch --export=ALL,EG1_CHAIN=$(( ${EG1_CHAIN:-1} + 1 )) \
+             --partition="${PARTITION_GPU:-general-gpu}" --gres="${GRES:-shard:a100-sxm4:1}" \
+             --account="${ACCOUNT}" --nodes=1 --ntasks=1 \
+             --cpus-per-task="${GPU_CPUS:-8}" --mem="${MEM:-16G}" \
+             --job-name="${SLURM_JOB_NAME:-md}" \
+             "${PIPELINE_ROOT}/run_md.batch"
+      exit 0
+    fi
+    if [ "${grompp_rc}" -ne 0 ] || [ ! -s min.tpr ]; then
+      echo ""
+      echo "FATAL: grompp of min.mdp FAILED (rc=${grompp_rc}). Nothing was simulated."
+      echo "       This is a topology or mdp problem, not a wall-time stop, so the"
+      echo "       chain stops here rather than resubmitting into the same failure."
+      echo "       The GROMACS error is above. Common causes:"
+      echo "         * a #include that does not resolve (check GMXLIB and the .ff dir)"
+      echo "         * atom-count mismatch between system.gro and system.top"
+      echo "           -- for a holo system, that usually means the glycan merge"
+      echo "              produced a .gro and a .top that disagree"
+      echo "         * a coupling group in tc-grps that does not exist"
+      exit 1
+    fi
+  fi
+  # -maxh here too: a job SIGKILLed mid-write leaves a truncated min.gro that the
+  # next job's `-s min.gro` check would accept as complete.
+  set +e
+  ${MDRUN} -v -deffnm min -maxh "$(remaining_h)"
+  min_rc=$?
+  set -e
+  PROGRESS=1
+  if [ ! -s min.gro ]; then
+    echo ""
+    echo "FATAL: minimisation produced no min.gro (mdrun rc=${min_rc}); see the log above."
+    if grep -qiE "no domain decomposition|not compatible with the given box|minimum cell size" \
+         min.log gmx_*.log 2>/dev/null; then
+      echo ""
+      echo "*** This is a DOMAIN DECOMPOSITION failure, not a physics problem."
+      echo "*** Lower NTASKS in ${PIPELINE_ROOT}/config.sh (try 16) and resubmit."
+    fi
+    exit 1
+  fi
+else
+  echo ""; echo "----- minimisation: already complete, skipping -----"
+fi
+
+# NOTE: each stage is guarded with `|| rc=$?` and the next runs inside an explicit
+# `if`, NOT `[ cond ] && { ... }`. Under `set -e` a top-level `&&` list that
+# evaluates false EXITS the script -- which would skip the status report and the
+# resubmit below, leaving the chain silently dead.
+rc=0
+run_stage nvt -f ${MDP}/nvt.mdp -c min.gro -r min.gro -p system.top || rc=$?
+
+if [ "${rc}" -eq 0 ]; then
+  run_stage npt -f ${MDP}/npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p system.top || rc=$?
+fi
+
+if [ "${rc}" -eq 0 ]; then
+  run_stage prod_1 -f ${MDP}/prod.mdp -c npt.gro -t npt.cpt -p system.top || rc=$?
+fi
+
+if [ "${rc}" -eq 3 ]; then
+  echo ""
+  echo "*** A stage failed without making progress. Fix it before resubmitting;"
+  echo "*** the log above has the GROMACS error. This job will NOT resubmit."
+elif [ "${rc}" -ne 0 ] && [ "${rc}" -ne 2 ]; then
+  echo ""
+  echo "*** A stage exited with status ${rc} (not a wall-time stop). Check the log."
+fi
+
+echo ""
+echo "=========================================================="
+echo "${SYSTEM} ${REP} -- stage status:"
+for s in min nvt npt prod_1; do
+  case "${s}" in
+    prod_1) tot=$(mdp_nsteps ${MDP}/prod.mdp) ;;
+    *)      tot=$(mdp_nsteps ${MDP}/${s}.mdp) ;;
+  esac
+  if [ -s "${s}.gro" ]; then
+    echo "  COMPLETE    ${s}"
+  elif [ -s "${s}.cpt" ] || [ -s "${s}_prev.cpt" ]; then
+    printf "  partial     %-7s step %s of %s" "${s}" "$(last_step ${s})" "${tot:-?}"
+    awk -v a="$(last_step ${s})" -v b="${tot:-0}" \
+        'BEGIN{ if (b>0) printf "  (%.1f%%)", 100*a/b }'
+    echo "   -- next job resumes here"
+  else
+    echo "  not started ${s}"
+  fi
+done
+echo "finished   : $(date)"
+echo "=========================================================="
+
+# --- resubmit if unfinished -------------------------------------------------
+if [ ! -s prod_1.gro ]; then
+  CHAIN=${EG1_CHAIN:-1}
+  LIMIT=${MAXCHAIN:-12}
+  if [ "${rc}" -eq 3 ]; then
+    echo ""
+    echo "NOT resubmitting: a stage failed rather than running out of time."
+    exit 1
+  fi
+  if [ "${PROGRESS}" -eq 0 ] && [ "${rc}" -ne 4 ] && [ "${GROMPP_TRANSIENT:-0}" -ne 1 ]; then
+    echo ""
+    echo "NOT resubmitting: no checkpoint advanced this job, so a resubmit would loop."
+    echo "Investigate the log above, then resubmit by hand:"
+    echo "  sbatch --job-name=${SLURM_JOB_NAME:-xyn} ${PIPELINE_ROOT}/run_md.batch"
+    exit 1
+  fi
+  if [ "${CHAIN}" -ge "${LIMIT}" ]; then
+    echo ""
+    echo "Chain limit ${LIMIT} reached without finishing. The run is intact and"
+    echo "checkpointed; this is only a runaway guard. Continue with:"
+    echo "  sbatch --export=ALL,EG1_CHAIN=1 --job-name=${SLURM_JOB_NAME:-xyn} ${PIPELINE_ROOT}/run_md.batch"
+    exit 0
+  fi
+  if [ "${XYN_AUTORESUB:-1}" = "1" ]; then
+    echo ""
+    echo "Chain unfinished -- resubmitting (link $((CHAIN + 1)) of ${LIMIT})."
+    # sbatch command-line options override the #SBATCH directives in the file, so
+    # a chain link inherits the same partition/ntasks/wall as the first
+    # submission even if config.sh was edited away from the built-in defaults.
+    # A transient sbatch failure (queue limits, a busy controller) would end the
+    # chain silently and leave a finished-looking job whose run is half done.
+    resub_ok=0
+    for attempt in 1 2 3; do
+      if sbatch --export=ALL,EG1_CHAIN=$((CHAIN + 1)) \
+                --partition="${PARTITION_GPU:-general-gpu}" --gres="${GRES:-shard:a100-sxm4:1}" \
+                --account="${ACCOUNT}" --nodes=1 --cpus-per-task="${GPU_CPUS:-8}" \
+                --mem="${MEM:-16G}" \
+                --ntasks="${NTASKS:-32}" \
+                --job-name="${SLURM_JOB_NAME:-xyn}" "${PIPELINE_ROOT}/run_md.batch"; then
+        resub_ok=1
+        break
+      fi
+      echo "sbatch attempt ${attempt} failed; retrying in 30 s."
+      sleep 30
+    done
+    if [ "${resub_ok}" -ne 1 ]; then
+      echo ""
+      echo "**********************************************************************"
+      echo "*** RESUBMIT FAILED after 3 attempts. THE CHAIN HAS STOPPED HERE.   ***"
+      echo "*** The run itself is intact and checkpointed -- nothing is lost --  ***"
+      echo "*** but no further job is queued. Restart it by hand with:           ***"
+      echo "***   cd $(pwd)"
+      echo "***   sbatch --job-name=${SLURM_JOB_NAME:-xyn} ${PIPELINE_ROOT}/run_md.batch"
+      echo "**********************************************************************"
+      exit 1
+    fi
+  else
+    echo ""
+    echo "Chain unfinished and XYN_AUTORESUB=0. Resume with:"
+    echo "  sbatch --job-name=${SLURM_JOB_NAME:-xyn} ${PIPELINE_ROOT}/run_md.batch"
+  fi
+else
+  echo ""
+  echo "ALL STAGES COMPLETE -- ${SYSTEM} ${REP}, ${PROD_NS:-200} ns production done."
+  echo "Remember: ${N_REPS:-2} replicates, reported individually -- never averaged into"
+  echo "          one curve with an error band."
+fi

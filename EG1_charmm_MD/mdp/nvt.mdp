@@ -1,0 +1,65 @@
+; Stage 1/3: 500 ps NVT, restrained. Identical for all six systems.
+;
+; -DPOSRES restrains PROTEIN HEAVY ATOMS everywhere, and in the holo systems it
+; ALSO restrains the ligand heavy atoms -- glycan.itp carries its own
+; "#ifdef POSRES -> posre_lig.itp" block, so the same define reaches both
+; molecules. That matters: an unrestrained hexasaccharide sitting in a cleft
+; while the protein around it is frozen can slide out of the site during the
+; very stage that is supposed to be settling the water.
+;
+; NOT the ADHA document's 100 ns, per your instruction. The solute is pinned
+; either way, so the extra 99.5 ns would relax the water box further but could
+; not let the protein sample anything.
+define                  = -DPOSRES
+
+integrator              = md
+nsteps                  = 250000    ; 500 ps @ 2 fs   <-- config.sh NVT_PS
+dt                      = 0.002
+continuation            = no
+constraint_algorithm    = lincs
+constraints             = h-bonds
+cutoff-scheme           = Verlet
+nstlist                 = 20
+
+; ===== NONBONDED: CHARMM36m ==================================================
+; Force-switch 1.0 -> 1.2 nm with NO analytic dispersion correction. This is not
+; a style preference. CHARMM36 was parameterised WITH the force-switch potential;
+; running it under a plain cutoff, or adding DispCorr on top, shifts the
+; energetics measurably. The CHARMM36 carbohydrate parameters used for the
+; xylohexaose come from the same release and want the same treatment, which is
+; part of why the ligand is built from carb.rtp rather than from CGenFF.
+vdwtype                 = cutoff
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+rlist                   = 1.2
+coulombtype             = PME
+rcoulomb                = 1.2
+pme_order               = 4
+fourierspacing          = 0.16
+DispCorr                = no
+; =============================================================================
+
+; Two coupling groups, solute and solvent, so the solute cannot run hot against
+; a cold bath. In the holo systems the ligand falls in Non-Protein: it is 55
+; heavy atoms against ~18,000 solvent atoms, far too small to bias that bath,
+; and keeping the groups index-file-free is what lets apo and holo share ONE
+; mdp set. Verified by prep_system.sh, which refuses a system whose default
+; groups do not exist.
+tcoupl                  = V-rescale
+tc-grps                 = Protein Non-Protein
+tau_t                   = 0.1     0.1
+ref_t                   = 300     300      ; config.sh TEMP_K
+pcoupl                  = no        ; constant volume
+
+gen_vel                 = yes
+gen_temp                = 300              ; config.sh TEMP_K
+gen_seed                = -1        ; randomised per replicate -- this single
+                                    ; line is what makes the three chains
+                                    ; independent experiments rather than three
+                                    ; copies of one run
+
+nstxout-compressed      = 5000      ; 10 ps/frame  <-- config.sh FRAME_PS
+compressed-x-grps       = System
+nstenergy               = 5000
+nstlog                  = 5000
